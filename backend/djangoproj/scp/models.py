@@ -49,6 +49,13 @@ class Supplier(models.Model):
     address = models.CharField(max_length=512, blank=True, null=True)
     contact_email = models.EmailField(blank=True, null=True)
     contact_phone = models.CharField(max_length=32, blank=True, null=True)
+    owner = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="owned_suppliers",
+        null=True,
+        blank=True
+    )
 
     # KYB / verification
     is_verified = models.BooleanField(default=False)

@@ -1,4 +1,3 @@
-# scp/views.py
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -9,6 +8,8 @@ from rest_framework import serializers
 from rest_framework.permissions import IsAuthenticated, BasePermission, SAFE_METHODS
 from rest_framework.routers import DefaultRouter
 from django.conf import settings
+from django.contrib.auth import authenticate
+from rest_framework.permissions import AllowAny
 
 from .models import (
     User, Supplier, SupplierKYBDocument, Consumer, ConsumerContact,
@@ -17,206 +18,18 @@ from .models import (
     Conversation, Message, Attachment, Rating, Notification, AuditLog
 )
 
-# -------------------------------
-# Serializers (compact but include key fields)
-# -------------------------------
+from .serializers import (
+    UserReadSerializer, UserWriteSerializer, SupplierSerializer, OrderSerializer,
+    RatingSerializer, MessageSerializer, ProductSerializer, AuditLogSerializer, ConsumerSerializer,
+    IncidentSerializer, ComplaintSerializer, OrderItemSerializer, AttachmentSerializer,
+    OrderCreateSerializer, ConversationSerializer, NotificationSerializer, SupplierKYBSerializer,
+    CatalogCategorySerializer, ConsumerContactSerializer, ProductAttachmentSerializer, SupplierConsumerLinkSerializer,
+    SupplierStaffMembershipSerializer, SupplierStaffMembership
+)
 
-class UserSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = User
-        fields = ['id', 'username', 'email', 'display_name', 'phone', 'role', 'is_active']
-        read_only_fields = ['id', 'is_active']
-
-class SupplierSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Supplier
-        fields = ['id','name','legal_name','description','country','city','address','contact_email','contact_phone',
-                  'is_verified','verification_status','default_currency','languages','created_at','updated_at','deleted']
-        read_only_fields = ['id','created_at','updated_at']
-
-class SupplierKYBSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = SupplierKYBDocument
-        fields = ['id','supplier','document','uploaded_by','uploaded_at','note']
-        read_only_fields = ['id','uploaded_by','uploaded_at']
-
-class ConsumerSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Consumer
-        fields = ['id','name','consumer_type','address','contact_email','contact_phone','languages','created_at','updated_at','deleted']
-        read_only_fields = ['id','created_at','updated_at']
-
-class ConsumerContactSerializer(serializers.ModelSerializer):
-    user = UserSerializer(read_only=True)
-    user_id = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), write_only=True, source='user')
-    class Meta:
-        model = ConsumerContact
-        fields = ['consumer','user','user_id','title','is_primary']
-
-class SupplierStaffMembershipSerializer(serializers.ModelSerializer):
-    user = UserSerializer(read_only=True)
-    user_id = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), write_only=True, source='user')
-    class Meta:
-        model = SupplierStaffMembership
-        fields = ['id','supplier','user','user_id','role','created_at','is_active']
-        read_only_fields = ['id','created_at']
-
-class SupplierConsumerLinkSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = SupplierConsumerLink
-        fields = ['id','supplier','consumer','requested_by','status','note','created_at','approved_by','approved_at','blocked_by','blocked_at']
-        read_only_fields = ['id','created_at','approved_by','approved_at','blocked_by','blocked_at','requested_by']
-
-class CatalogCategorySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = CatalogCategory
-        fields = ['id','supplier','name','slug','parent']
-
-class ProductSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Product
-        fields = ['id','supplier','category','name','description','unit','price','discount_percentage','stock','min_order_quantity',
-                  'is_active','delivery_option','lead_time_days','image','created_at','updated_at']
-        read_only_fields = ['id','created_at','updated_at']
-
-class ProductAttachmentSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = ProductAttachment
-        fields = ['id','product','file','uploaded_by','uploaded_at']
-        read_only_fields = ['id','uploaded_by','uploaded_at']
-
-class OrderItemSerializer(serializers.ModelSerializer):
-    product_detail = ProductSerializer(source='product', read_only=True)
-    class Meta:
-        model = OrderItem
-        fields = ['id','order','product','product_detail','quantity','unit_price','line_total','note','is_accepted','is_cancelled']
-
-class OrderSerializer(serializers.ModelSerializer):
-    items = OrderItemSerializer(many=True, read_only=True)
-    class Meta:
-        model = Order
-        fields = ['id','supplier','consumer','placed_by','status','note','total_amount','created_at','accepted_at','completed_at','tracking_code','estimated_delivery','items']
-        read_only_fields = ['id','created_at','accepted_at','completed_at','total_amount']
-
-class OrderCreateSerializer(serializers.ModelSerializer):
-    items = OrderItemSerializer(many=True, write_only=True)
-    class Meta:
-        model = Order
-        fields = ['supplier','consumer','placed_by','note','items','estimated_delivery']
-
-    def create(self, validated_data):
-        items_data = validated_data.pop('items', [])
-        with transaction.atomic():
-            order = Order.objects.create(**validated_data, total_amount=0)
-            total = 0
-            for item in items_data:
-                product = item['product']
-                unit_price = item.get('unit_price') or product.effective_price
-                quantity = item['quantity']
-                line_total = unit_price * quantity
-                OrderItem.objects.create(order=order, product=product, quantity=quantity, unit_price=unit_price, line_total=line_total)
-                total += line_total
-                # reduce stock? or let supplier accept first; we leave stock management to separate endpoint
-            order.total_amount = total
-            order.save()
-        return order
-
-class ComplaintSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Complaint
-        fields = ['id','order','order_item','filed_by','assigned_to','status','description','resolution','created_at','updated_at','resolved_at','escalated_to','escalated_at']
-        read_only_fields = ['id','created_at','updated_at','resolved_at','escalated_at']
-
-class IncidentSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Incident
-        fields = ['id','supplier','consumer','reported_by','title','description','status','created_at','updated_at','exported']
-        read_only_fields = ['id','created_at','updated_at']
-
-class ConversationSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Conversation
-        fields = ['id','supplier','consumer','created_at','updated_at']
-        read_only_fields = ['id','created_at','updated_at']
-
-class MessageSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Message
-        fields = ['id','conversation','sender','text','created_at','is_read']
-        read_only_fields = ['id','created_at']
-
-class AttachmentSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Attachment
-        fields = ['id','message','file','filename','uploaded_at']
-        read_only_fields = ['id','uploaded_at']
-
-class RatingSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Rating
-        fields = ['id','order','score','comment','created_at']
-        read_only_fields = ['id','created_at']
-
-class NotificationSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Notification
-        fields = ['id','user','title','body','is_read','created_at']
-        read_only_fields = ['id','created_at']
-
-class AuditLogSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = AuditLog
-        fields = ['id','actor','action','target_type','target_id','data','timestamp']
-        read_only_fields = ['id','timestamp']
-
-# -------------------------------
-# Permissions
-# -------------------------------
-
-class IsSupplierStaff(BasePermission):
-    """
-    Allow access if user is staff of the supplier (owner/manager/sales).
-    Expect view to set .get_supplier() or use supplier lookup from request data.
-    """
-    def has_permission(self, request, view):
-        # safe methods allowed for authenticated users for many endpoints; enforce object-level where needed
-        return request.user and request.user.is_authenticated
-
-    def has_object_permission(self, request, view, obj):
-        # obj may be Supplier or model with .supplier
-        supplier = getattr(obj, 'supplier', obj if isinstance(obj, Supplier) else None)
-        if supplier is None:
-            return False
-        return SupplierStaffMembership.objects.filter(supplier=supplier, user=request.user, is_active=True).exists() or (request.user.role == 'platform_admin')
-
-class IsOwnerOrManager(BasePermission):
-    def has_object_permission(self, request, view, obj):
-        # obj expected Supplier
-        if not isinstance(obj, Supplier):
-            return False
-        return SupplierStaffMembership.objects.filter(supplier=obj, user=request.user, role__in=['owner','manager']).exists() or (request.user.role == 'platform_admin')
-
-class IsLinkedConsumer(BasePermission):
-    """
-    Ensures consumer is linked/approved to supplier before viewing catalog/orders.
-    """
-    def has_permission(self, request, view):
-        # For list operations, rely on querysets; for object-level, check below
-        return request.user and request.user.is_authenticated
-
-    def has_object_permission(self, request, view, obj):
-        # obj may be Supplier or Product or Order
-        supplier = None
-        if isinstance(obj, Supplier):
-            supplier = obj
-        else:
-            supplier = getattr(obj, 'supplier', None)
-        if supplier is None:
-            return False
-        # find consumer(s) for request.user
-        # user -> ConsumerContact -> Consumer
-        contacts = ConsumerContact.objects.filter(user=request.user).values_list('consumer_id', flat=True)
-        return SupplierConsumerLink.objects.filter(supplier=supplier, consumer_id__in=contacts, status=SupplierConsumerLink.Status.APPROVED).exists()
+from .permissions import (
+    IsAuthenticated, IsLinkedConsumer, IsOwnerOrManager, IsSupplierStaff
+)
 
 # -------------------------------
 # ViewSets
@@ -224,13 +37,38 @@ class IsLinkedConsumer(BasePermission):
 
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
-    serializer_class = UserSerializer
-    permission_classes = [IsAuthenticated]  # optionally restrict/create endpoints to admins for user creation
 
-    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
-    def me(self, request):
-        serializer = self.get_serializer(request.user)
-        return Response(serializer.data)
+    def get_serializer_class(self):
+        print(self.action)
+        if self.action in ['list', 'retrieve']:
+            return UserReadSerializer
+        return UserWriteSerializer
+    # permission_classes = []  # Keep open for registration
+
+    # Registration
+    @action(detail=False, methods=['post'], url_path='register')
+    def register(self, request):
+        data = request.data
+        serializer = self.get_serializer(data=data)
+        if serializer.is_valid():
+            user = serializer.save()
+            user.set_password(data['password'])  # hash password
+            user.save()
+            return Response(self.get_serializer(user).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    # Login
+    @action(detail=False, methods=['post'], url_path='login')
+    def login(self, request):
+        username = request.data.get('username')
+        password = request.data.get('password')
+        user = authenticate(username=username, password=password)
+        if user:
+            # If you use token auth:
+            from rest_framework.authtoken.models import Token
+            token, created = Token.objects.get_or_create(user=user)
+            return Response({'token': token.key})
+        return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
 
 class SupplierViewSet(viewsets.ModelViewSet):
     queryset = Supplier.objects.all()
@@ -310,6 +148,7 @@ class LinkViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         # consumer triggers link request
         data = request.data.copy()
+        print(data)
         # if user is consumer contact, attach requested_by
         data['requested_by'] = request.user.pk
         serializer = self.get_serializer(data=data)

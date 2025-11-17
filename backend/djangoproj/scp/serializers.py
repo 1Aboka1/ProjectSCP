@@ -88,7 +88,6 @@ class SupplierConsumerLinkSerializer(serializers.ModelSerializer):
         read_only_fields = ['id','created_at','approved_by','approved_at','blocked_by','blocked_at','requested_by']
     
     def create(self, validated_data):
-        validated_data['consumer'] = self.context['request'].user.consumer_profile
         validated_data['status'] = 'pending'
         return super().create(validated_data)
 
@@ -107,14 +106,17 @@ class ProductSerializer(serializers.ModelSerializer):
 class ProductAttachmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductAttachment
-        fields = ['id','product','file','uploaded_by','uploaded_at']
-        read_only_fields = ['id','uploaded_by','uploaded_at']
+        fields = ["id", "product", "file", "uploaded_by", "uploaded_at"]
+        read_only_fields = ["id", "uploaded_by", "uploaded_at"]
 
 class OrderItemSerializer(serializers.ModelSerializer):
-    product_detail = ProductSerializer(source='product', read_only=True)
+    order = serializers.PrimaryKeyRelatedField(read_only=True)
+    unit_price = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    line_total = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+
     class Meta:
         model = OrderItem
-        fields = ['id','order','product','product_detail','quantity','unit_price','line_total','note','is_accepted','is_cancelled']
+        fields = ["order", "product", "quantity", "unit_price", "line_total"]
 
 class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, read_only=True)
@@ -122,12 +124,64 @@ class OrderSerializer(serializers.ModelSerializer):
         model = Order
         fields = ['id','supplier','consumer','placed_by','status','note','total_amount','created_at','accepted_at','completed_at','tracking_code','estimated_delivery','items']
         read_only_fields = ['id','created_at','accepted_at','completed_at','total_amount']
+    
+    def create(self, validated_data):
+        items_data = validated_data.pop('items')
+        order = Order.objects.create(**validated_data)
+        for item_data in items_data:
+            product = item_data['product']
+            quantity = item_data['quantity']
+            OrderItem.objects.create(
+                order=order,
+                product=product,
+                quantity=quantity,
+                unit_price=product.price,
+                line_total=product.price * quantity
+            )
+        return order
+
 
 class OrderCreateSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, write_only=True)
     class Meta:
         model = Order
         fields = ['supplier','consumer','placed_by','note','items','estimated_delivery']
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+
+        supplier = attrs.get("supplier")
+        consumer = attrs.get("consumer")
+
+        # 1) Authenticated user required
+        if user is None or not user.is_authenticated:
+            raise serializers.ValidationError({"detail": "Authentication required."})
+
+        # 2) Check that user is a contact for the given consumer (via ConsumerContact)
+        is_contact = ConsumerContact.objects.filter(consumer=consumer, user=user).exists()
+        if not is_contact:
+            raise serializers.ValidationError(
+                {"consumer": "Authenticated user is not a contact for this consumer."}
+            )
+
+        # 3) Check that the consumer and supplier are linked and APPROVED
+        link_exists = SupplierConsumerLink.objects.filter(
+            consumer=consumer,
+            supplier=supplier,
+            status=SupplierConsumerLink.Status.APPROVED
+        ).exists()
+        if not link_exists:
+            raise serializers.ValidationError(
+                {"detail": "This consumer is not linked (or not approved) with the supplier."}
+            )
+
+        # 4) Enforce placed_by == authenticated user (if supplied), otherwise will set it in create()
+        placed_by = attrs.get("placed_by")
+        if placed_by and placed_by != user:
+            raise serializers.ValidationError({"placed_by": "placed_by must be the authenticated user."})
+
+        return attrs
 
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
@@ -158,17 +212,23 @@ class IncidentSerializer(serializers.ModelSerializer):
         fields = ['id','supplier','consumer','reported_by','title','description','status','created_at','updated_at','exported']
         read_only_fields = ['id','created_at','updated_at']
 
-class ConversationSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Conversation
-        fields = ['id','supplier','consumer','created_at','updated_at']
-        read_only_fields = ['id','created_at','updated_at']
-
 class MessageSerializer(serializers.ModelSerializer):
+    sender_name = serializers.CharField(source='sender.username', read_only=True)
+    
     class Meta:
         model = Message
-        fields = ['id','conversation','sender','text','created_at','is_read']
-        read_only_fields = ['id','created_at']
+        fields = ['id', 'sender', 'sender_name', 'text', 'created_at', 'is_read']
+        read_only_fields = ['id', 'sender', 'created_at', 'is_read']
+
+class ConversationSerializer(serializers.ModelSerializer):
+    messages = MessageSerializer(many=True, read_only=True)
+    supplier_name = serializers.CharField(source='supplier.name', read_only=True)
+    consumer_name = serializers.CharField(source='consumer.name', read_only=True)
+    
+    class Meta:
+        model = Conversation
+        fields = ['id', 'supplier', 'supplier_name', 'consumer', 'consumer_name', 'created_at', 'updated_at', 'messages']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'messages']
 
 class AttachmentSerializer(serializers.ModelSerializer):
     class Meta:

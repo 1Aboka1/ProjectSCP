@@ -28,7 +28,7 @@ from .serializers import (
 )
 
 from .permissions import (
-    IsAuthenticated, IsLinkedConsumer, IsOwnerOrManager, IsSupplierStaff
+    IsAuthenticated, IsConversationParticipant, IsLinkedConsumerAndSupplierStaff, IsOwnerOrManager, IsSupplierStaff
 )
 
 # -------------------------------
@@ -39,7 +39,6 @@ class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
 
     def get_serializer_class(self):
-        print(self.action)
         if self.action in ['list', 'retrieve']:
             return UserReadSerializer
         return UserWriteSerializer
@@ -148,7 +147,6 @@ class LinkViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         # consumer triggers link request
         data = request.data.copy()
-        print(data)
         # if user is consumer contact, attach requested_by
         data['requested_by'] = request.user.pk
         serializer = self.get_serializer(data=data)
@@ -184,21 +182,55 @@ class CategoryViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsSupplierStaff]
 
 class ProductViewSet(viewsets.ModelViewSet):
-    queryset = Product.objects.select_related('supplier').all()
     serializer_class = ProductSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        user = self.request.user
+
+        # Platform admin sees everything
+        if user.role == "platform_admin":
+            return Product.objects.select_related("supplier").all()
+
+        # Supplier staff sees only their supplier’s products
+        supplier_ids = SupplierStaffMembership.objects.filter(
+            user=user,
+            is_active=True
+        ).values_list("supplier_id", flat=True)
+
+        if supplier_ids.exists():
+            return Product.objects.select_related("supplier").filter(
+                supplier_id__in=supplier_ids
+            )
+
+        # Consumer: get linked suppliers
+        consumer_ids = ConsumerContact.objects.filter(
+            user=user,
+            is_primary=True
+        ).values_list("consumer_id", flat=True)
+
+        # find links for these consumers
+        linked_supplier_ids = SupplierConsumerLink.objects.filter(
+            consumer_id__in=consumer_ids,
+            status=SupplierConsumerLink.Status.APPROVED,
+        ).values_list("supplier_id", flat=True)
+
+        return Product.objects.select_related("supplier").filter(
+            supplier_id__in=linked_supplier_ids
+        )
+
     def get_permissions(self):
-        # For unsafe methods require supplier staff; safe methods allowed if consumer is linked or staff
+        # Safe methods allowed to all authenticated users (supplier staff or linked consumers)
         if self.request.method in SAFE_METHODS:
-            return [IsAuthenticated(), ]
+            return [IsAuthenticated()]
+        # Unsafe methods require supplier staff
         return [IsAuthenticated(), IsSupplierStaff()]
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsSupplierStaff])
     def adjust_stock(self, request, pk=None):
         product = self.get_object()
         delta = float(request.data.get('delta', 0))
-        product.stock = product.stock + delta
+        product.stock = float(product.stock) + delta
         product.save()
         return Response(ProductSerializer(product).data)
 
@@ -207,8 +239,10 @@ class ProductAttachmentViewSet(viewsets.ModelViewSet):
     serializer_class = ProductAttachmentSerializer
     permission_classes = [IsAuthenticated, IsSupplierStaff]
 
+    def perform_create(self, serializer):
+        serializer.save(uploaded_by=self.request.user)
+
 class OrderViewSet(viewsets.ModelViewSet):
-    queryset = Order.objects.prefetch_related('items').all()
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
 
@@ -216,6 +250,28 @@ class OrderViewSet(viewsets.ModelViewSet):
         if self.action == 'create':
             return OrderCreateSerializer
         return OrderSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+
+        # Consumer: only see orders for consumers they belong to
+        if user.role == 'consumer_contact':
+            from scp.models import ConsumerContact
+            consumers = ConsumerContact.objects.filter(user=user).values_list('consumer', flat=True)
+            return Order.objects.prefetch_related('items').filter(consumer__in=consumers)
+
+        # Supplier staff: only see orders for supplier(s) they belong to
+        elif user.role in ['owner', 'manager', 'sales']:
+            from scp.models import SupplierStaffMembership
+            suppliers = SupplierStaffMembership.objects.filter(user=user, is_active=True).values_list('supplier', flat=True)
+            return Order.objects.prefetch_related('items').filter(supplier__in=suppliers)
+
+        # Platform admins: see all orders
+        elif user.role == 'platform_admin':
+            return Order.objects.prefetch_related('items').all()
+
+        # Default: empty queryset
+        return Order.objects.none()
 
     def create(self, request, *args, **kwargs):
         # ensure consumer is linked to supplier
@@ -232,7 +288,6 @@ class OrderViewSet(viewsets.ModelViewSet):
         order.status = Order.Status.ACCEPTED
         order.accepted_at = timezone.now()
         order.save()
-        # optionally decrement stock:
         for item in order.items.all():
             p = item.product
             p.stock = p.stock - item.quantity
@@ -251,7 +306,6 @@ class OrderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def cancel(self, request, pk=None):
         order = self.get_object()
-        # allow consumer or supplier staff to cancel depending on status
         if order.status in [Order.Status.COMPLETED, Order.Status.CANCELLED]:
             return Response({'detail':'Cannot cancel'}, status=status.HTTP_400_BAD_REQUEST)
         order.status = Order.Status.CANCELLED
@@ -268,7 +322,10 @@ class ComplaintViewSet(viewsets.ModelViewSet):
     serializer_class = ComplaintSerializer
     permission_classes = [IsAuthenticated]
 
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def perform_create(self, serializer):
+        serializer.save(filed_by=self.request.user)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsSupplierStaff])
     def escalate(self, request, pk=None):
         complaint = self.get_object()
         target_user_id = request.data.get('to_user_id')
@@ -276,11 +333,28 @@ class ComplaintViewSet(viewsets.ModelViewSet):
         complaint.escalate(to_user=target)
         return Response(self.get_serializer(complaint).data)
 
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsSupplierStaff])
     def resolve(self, request, pk=None):
         complaint = self.get_object()
-        resolution_text = request.data.get('resolution','')
-        complaint.mark_resolved(resolver=request.user, resolution_text=resolution_text)
+
+        resolution_text = request.data.get('resolution')
+
+        if not resolution_text:
+            return Response(
+                {"detail": "Resolution text cannot be empty."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if not resolution_text.strip():
+            return Response(
+                {"detail": "Resolution text cannot be empty."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        complaint.mark_resolved(
+            resolver=request.user,
+            resolution_text=resolution_text
+        )
+
         return Response(self.get_serializer(complaint).data)
 
 class IncidentViewSet(viewsets.ModelViewSet):
@@ -289,21 +363,25 @@ class IncidentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
 class ConversationViewSet(viewsets.ModelViewSet):
-    queryset = Conversation.objects.all()
+    queryset = Conversation.objects.prefetch_related('messages').all()
     serializer_class = ConversationSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsConversationParticipant]
 
-    def create(self, request, *args, **kwargs):
-        # Create conversation only if link approved
-        supplier_id = request.data.get('supplier')
-        consumer_id = request.data.get('consumer')
-        supplier = get_object_or_404(Supplier, pk=supplier_id)
-        consumer = get_object_or_404(Consumer, pk=consumer_id)
-        # check link
-        if not SupplierConsumerLink.objects.filter(supplier=supplier, consumer=consumer, status=SupplierConsumerLink.Status.APPROVED).exists():
-            return Response({'detail':'No approved link'}, status=status.HTTP_400_BAD_REQUEST)
-        conv, created = Conversation.objects.get_or_create(supplier=supplier, consumer=consumer)
-        return Response(ConversationSerializer(conv).data)
+    def get_queryset(self):
+        user = self.request.user
+        if user.role in ['owner', 'manager', 'sales']:
+            return Conversation.objects.filter(supplier__staff_members__user=user, supplier__staff_members__is_active=True)
+        elif user.role == 'consumer_contact':
+            return Conversation.objects.filter(consumer__contacts__user=user)
+        return Conversation.objects.none()
+
+    @action(detail=True, methods=['post'])
+    def send_message(self, request, pk=None):
+        conversation = self.get_object()
+        serializer = MessageSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(sender=request.user, conversation=conversation)
+        return Response(serializer.data)
 
 class MessageViewSet(viewsets.ModelViewSet):
     queryset = Message.objects.select_related('conversation').all()

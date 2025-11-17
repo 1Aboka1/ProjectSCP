@@ -28,16 +28,28 @@ class IsSupplierStaff(BasePermission):
     Expect view to set .get_supplier() or use supplier lookup from request data.
     """
     def has_permission(self, request, view):
+        user = request.user
         # safe methods allowed for authenticated users for many endpoints; enforce object-level where needed
-        return request.user and request.user.is_authenticated
+        if user and user.is_authenticated and user.role in ["owner", "manager", "sales"]:
+            return True
+        return False
 
     def has_object_permission(self, request, view, obj):
-        # obj may be Supplier or model with .supplier
-        supplier = getattr(obj, 'supplier', obj if isinstance(obj, Supplier) else None)
+        # Try direct supplier
+        supplier = getattr(obj, 'supplier', None)
+
+        # If obj has order, get supplier from order
+        if supplier is None and hasattr(obj, 'order'):
+            supplier = getattr(obj.order, 'supplier', None)
+
         if supplier is None:
             return False
-        return SupplierStaffMembership.objects.filter(supplier=supplier, user=request.user, is_active=True).exists() or (request.user.role == 'platform_admin')
 
+        return (
+            SupplierStaffMembership.objects.filter(supplier=supplier, user=request.user, is_active=True).exists()
+            or request.user.role == 'platform_admin'
+        )
+    
 class IsOwnerOrManager(BasePermission):
     def has_object_permission(self, request, view, obj):
         # obj expected Supplier
@@ -45,24 +57,70 @@ class IsOwnerOrManager(BasePermission):
             return False
         return SupplierStaffMembership.objects.filter(supplier=obj, user=request.user, role__in=['owner','manager']).exists() or (request.user.role == 'platform_admin')
 
-class IsLinkedConsumer(BasePermission):
+class IsLinkedConsumerAndSupplierStaff(BasePermission):
     """
     Ensures consumer is linked/approved to supplier before viewing catalog/orders.
     """
+    
     def has_permission(self, request, view):
-        # For list operations, rely on querysets; for object-level, check below
-        return request.user and request.user.is_authenticated
+        user = request.user
+
+        # Only authenticated users
+        if not user or not user.is_authenticated:
+            return False
+
+        # Supplier staff can view but not create
+        if request.method in SAFE_METHODS:
+            return True
+
+        # For POST (creating incident)
+        if request.method == 'POST':
+            # Get all consumer instances for this user
+            consumer_contacts = ConsumerContact.objects.filter(user=user)
+            consumer_ids = consumer_contacts.values_list('consumer_id', flat=True)
+
+            # Get supplier ID from request data
+            supplier_id = request.data.get('supplier')
+            if not supplier_id:
+                return False
+
+            # Check if there's an approved link for this consumer(s)
+            is_linked = SupplierConsumerLink.objects.filter(
+                consumer_id__in=consumer_ids,
+                supplier_id=supplier_id,
+                status=SupplierConsumerLink.Status.APPROVED
+            ).exists()
+
+            return is_linked
+
+        # Deny all other methods
+        return False
 
     def has_object_permission(self, request, view, obj):
-        # obj may be Supplier or Product or Order
-        supplier = None
-        if isinstance(obj, Supplier):
-            supplier = obj
-        else:
-            supplier = getattr(obj, 'supplier', None)
-        if supplier is None:
-            return False
-        # find consumer(s) for request.user
-        # user -> ConsumerContact -> Consumer
-        contacts = ConsumerContact.objects.filter(user=request.user).values_list('consumer_id', flat=True)
-        return SupplierConsumerLink.objects.filter(supplier=supplier, consumer_id__in=contacts, status=SupplierConsumerLink.Status.APPROVED).exists()
+        # allow supplier staff
+        if SupplierStaffMembership.objects.filter(
+            supplier=obj.supplier, user=request.user, is_active=True
+        ).exists():
+            return True
+
+        # allow linked consumer
+        linked = SupplierConsumerLink.objects.filter(
+            consumer__in=ConsumerContact.objects.filter(user=request.user).values_list('consumer', flat=True),
+            supplier=obj.supplier,
+            status='approved'
+        ).exists()
+        return linked
+
+class IsConversationParticipant(BasePermission):
+    """
+    Only supplier staff or consumer linked to the conversation can read/write messages.
+    """
+    def has_object_permission(self, request, view, obj):
+        # obj is Conversation
+        user = request.user
+        if hasattr(user, 'role'):
+            if user.role in ['owner', 'manager', 'sales']:
+                return obj.supplier.staff_members.filter(user=user, is_active=True).exists()
+            if user.role == 'consumer_contact':
+                return obj.consumer.contacts.filter(user=user).exists()
+        return False

@@ -265,10 +265,23 @@ class Product(models.Model):
 
 
 class ProductAttachment(models.Model):
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="attachments")
-    file = models.FileField(upload_to="product_attachments/%Y/%m/%d/")
-    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="product_attachments",  # must be unique to avoid clashes
+    )
+    file = models.FileField(upload_to="product_attachments/%Y/%m/%d/", blank=True, null=True)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True
+    )
     uploaded_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f"Attachment for {self.product.name} uploaded by {self.uploaded_by}"
+
 
 
 # -----------------------------

@@ -6,6 +6,9 @@ from scp.models import (
     User, Supplier, Consumer,
     SupplierStaffMembership, SupplierConsumerLink, ConsumerContact
 )
+from scp.serializers import (
+    SupplierConsumerLinkSerializer
+)
 
 
 class SupplierConsumerLinkTests(APITestCase):
@@ -62,7 +65,10 @@ class SupplierConsumerLinkTests(APITestCase):
         self.authenticate(self.consumer_user)
 
         url = reverse("link-list")
-        body = {"supplier": self.supplier.id}
+        body = {
+                "supplier": self.supplier.id,
+                "consumer": self.consumer.id
+            }
 
         response = self.client.post(url, body, format="json")
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -71,7 +77,7 @@ class SupplierConsumerLinkTests(APITestCase):
             supplier=self.supplier, consumer=self.consumer
         )
         self.assertEqual(link.status, "pending")
-
+    
     # ------------------------
     # 2. Duplicate request blocked
     # ------------------------
@@ -82,7 +88,7 @@ class SupplierConsumerLinkTests(APITestCase):
 
         self.authenticate(self.consumer_user)
 
-        url = reverse("links-create")
+        url = reverse("link-list")
         response = self.client.post(url, {"supplier": self.supplier.id}, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -99,7 +105,7 @@ class SupplierConsumerLinkTests(APITestCase):
 
         self.authenticate(self.supplier_owner)
 
-        url = reverse("supplier-links-approve", args=[link.id])
+        url = reverse("link-approve", args=[link.id])
         response = self.client.post(url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -119,7 +125,7 @@ class SupplierConsumerLinkTests(APITestCase):
 
         self.authenticate(self.supplier_owner)
 
-        url = reverse("supplier-links-block", args=[link.id])
+        url = reverse("link-block", args=[link.id])
         response = self.client.post(url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -131,7 +137,7 @@ class SupplierConsumerLinkTests(APITestCase):
     # 5. Consumer views approved suppliers
     # ------------------------
     def test_view_consumer_links(self):
-        SupplierConsumerLink.objects.create(
+        link = SupplierConsumerLink.objects.create(
             supplier=self.supplier,
             consumer=self.consumer,
             status="approved"
@@ -139,8 +145,12 @@ class SupplierConsumerLinkTests(APITestCase):
 
         self.authenticate(self.consumer_user)
 
-        url = reverse("consumer-links-list")
+        url = reverse("link-list")
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        serialized_link = SupplierConsumerLinkSerializer(link).data
+
+        # response.data is usually a list for 'list' endpoint
         self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0], serialized_link)

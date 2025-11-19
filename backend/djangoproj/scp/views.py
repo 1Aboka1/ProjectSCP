@@ -317,44 +317,125 @@ class OrderItemViewSet(viewsets.ModelViewSet):
     serializer_class = OrderItemSerializer
     permission_classes = [IsAuthenticated]
 
+def pick_staff_for_handling(supplier):
+        """
+        Pick active supplier staff by priority:
+        sales → manager → owner
+        """
+        priority = ["sales", "manager", "owner"]
+
+        for role in priority:
+            member = SupplierStaffMembership.objects.filter(
+                supplier=supplier,
+                role=role,
+                is_active=True
+            ).first()
+            if member:
+                return member
+
+        return None  # no available staff
+
 class ComplaintViewSet(viewsets.ModelViewSet):
     queryset = Complaint.objects.select_related('order').all()
     serializer_class = ComplaintSerializer
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def perform_create(self, serializer):
-        serializer.save(filed_by=self.request.user)
+        complaint = serializer.save(filed_by=self.request.user)
 
+        order = complaint.order
+        supplier = order.supplier
+
+        # Determine consumer contact
+        consumer_contact = ConsumerContact.objects.filter(user=complaint.filed_by).first()
+        if not consumer_contact:
+            return Response({'detail':'No valid consumer contact found.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Determine proper supplier staff based on priority
+        supplier_staff = pick_staff_for_handling(supplier)  # returns a SupplierStaffMembership instance
+        if not supplier_staff:
+            return Response({'detail':'No active supplier staff available.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Create conversation WITHOUT supplier_staff
+        conversation_qs = Conversation.objects.filter(
+            consumer_contact=consumer_contact,
+            complaint=complaint
+        )
+
+        if conversation_qs.exists():
+            conversation = conversation_qs.first()
+            created = False
+        else:
+            conversation = Conversation.objects.create(
+                consumer_contact=consumer_contact,
+                complaint=complaint
+            )
+            # Add supplier staff AFTER creation
+            conversation.supplier_staff.add(supplier_staff)
+            created = True
+
+        # Link complaint to conversation (optional if already linked)
+        conversation.complaint = complaint
+        conversation.save(update_fields=['complaint'])
+
+    # ---------------------------
+    # Escalate complaint
+    # ---------------------------
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsSupplierStaff])
     def escalate(self, request, pk=None):
         complaint = self.get_object()
-        target_user_id = request.data.get('to_user_id')
-        target = get_object_or_404(User, pk=target_user_id)
-        complaint.escalate(to_user=target)
+        supplier = complaint.order.supplier
+
+        current_member = SupplierStaffMembership.objects.filter(
+            user=complaint.escalated_to or complaint.order.supplier.owner,
+            supplier=supplier
+        ).first()
+
+        # Determine current role
+        current_role = current_member.role if current_member else None
+
+        role_chain = ["sales", "manager", "owner"]
+
+        if current_role not in role_chain:
+            return Response({"detail": "Current staff role invalid."}, status=400)
+
+        # Find next level
+        try:
+            next_role = role_chain[role_chain.index(current_role) + 1]
+        except IndexError:
+            return Response({"detail": "Already at highest escalation level (owner)."}, status=400)
+
+        # Get next available staff of that role
+        next_member = SupplierStaffMembership.objects.filter(
+            supplier=supplier,
+            role=next_role,
+            is_active=True
+        ).first()
+
+        if not next_member:
+            return Response({"detail": f"No active {next_role} available for escalation."}, status=400)
+
+        # Use model escalate() method
+        complaint.escalate(to_user=next_member.user)
+
         return Response(self.get_serializer(complaint).data)
 
+    # ---------------------------
+    # Resolve complaint
+    # ---------------------------
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsSupplierStaff])
     def resolve(self, request, pk=None):
         complaint = self.get_object()
-
-        resolution_text = request.data.get('resolution')
+        resolution_text = request.data.get('resolution', '').strip()
 
         if not resolution_text:
             return Response(
                 {"detail": "Resolution text cannot be empty."},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        if not resolution_text.strip():
-            return Response(
-                {"detail": "Resolution text cannot be empty."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
 
-        complaint.mark_resolved(
-            resolver=request.user,
-            resolution_text=resolution_text
-        )
-
+        complaint.mark_resolved(resolver=request.user, resolution_text=resolution_text)
         return Response(self.get_serializer(complaint).data)
 
 class IncidentViewSet(viewsets.ModelViewSet):
@@ -363,25 +444,84 @@ class IncidentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
 class ConversationViewSet(viewsets.ModelViewSet):
-    queryset = Conversation.objects.prefetch_related('messages').all()
+    queryset = Conversation.objects.all()
     serializer_class = ConversationSerializer
-    permission_classes = [IsAuthenticated, IsConversationParticipant]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
-        if user.role in ['owner', 'manager', 'sales']:
-            return Conversation.objects.filter(supplier__staff_members__user=user, supplier__staff_members__is_active=True)
-        elif user.role == 'consumer_contact':
-            return Conversation.objects.filter(consumer__contacts__user=user)
+
+        # Supplier staff?
+        supplier_staff_qs = SupplierStaffMembership.objects.filter(user=user, is_active=True)
+        if supplier_staff_qs.exists():
+            return Conversation.objects.filter(supplier_staff__in=supplier_staff_qs)
+
+        # Consumer contact?
+        consumer_contact_qs = ConsumerContact.objects.filter(user=user)
+        if consumer_contact_qs.exists():
+            return Conversation.objects.filter(consumer_contact__in=consumer_contact_qs)
+
         return Conversation.objects.none()
 
     @action(detail=True, methods=['post'])
     def send_message(self, request, pk=None):
         conversation = self.get_object()
+
+        user = request.user
+
+        # Check if sender is any of the supplier staff or the consumer contact
+        is_supplier_staff = conversation.supplier_staff.filter(user=user, is_active=True).exists()
+        is_consumer_contact = conversation.consumer_contact.user == user
+
+        if not (is_supplier_staff or is_consumer_contact):
+            return Response(
+                {"detail": "You are not a participant of this conversation."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
         serializer = MessageSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(sender=request.user, conversation=conversation)
+        serializer.save(sender=user, conversation=conversation)
+
         return Response(serializer.data)
+
+    @action(detail=False, methods=['post'])
+    def create_for_complaint(self, request):
+        """
+        Optional endpoint to create a conversation tied to a complaint.
+        If a conversation already exists for the linked consumer & supplier, return it.
+        """
+        complaint_id = request.data.get("complaint_id")
+        complaint = get_object_or_404(Complaint, id=complaint_id)
+
+        # Determine participants
+        consumer_contact = complaint.filed_by.consumercontact_set.first()
+        supplier_staff = SupplierStaffMembership.objects.filter(supplier=complaint.order.supplier, is_active=True).first()
+
+        if not consumer_contact or not supplier_staff:
+            return Response({"detail": "Cannot find participants for conversation."}, status=status.HTTP_400_BAD_REQUEST)
+
+        conversation_qs = Conversation.objects.filter(
+            consumer_contact=consumer_contact,
+            complaint=complaint
+        )
+
+        if conversation_qs.exists():
+            conversation = conversation_qs.first()
+            created = False
+        else:
+            conversation = Conversation.objects.create(
+                consumer_contact=consumer_contact,
+                complaint=complaint
+            )
+            # Add all relevant supplier staff, or at least one default
+            # For simplicity, add the first active supplier staff
+            conversation.supplier_staff.add(supplier_staff)
+            created = True
+
+
+        serializer = self.get_serializer(conversation)
+        return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 class MessageViewSet(viewsets.ModelViewSet):
     queryset = Message.objects.select_related('conversation').all()

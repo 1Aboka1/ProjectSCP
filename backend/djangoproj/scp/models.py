@@ -412,18 +412,35 @@ class Incident(models.Model):
 # Chat / Messaging
 # -----------------------------
 class Conversation(models.Model):
-    # Conversations are created only between a supplier and consumer after link approval
-    supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE, related_name="conversations")
-    consumer = models.ForeignKey(Consumer, on_delete=models.CASCADE, related_name="conversations")
+    # Multiple supplier staff can participate in same conversation
+    supplier_staff = models.ManyToManyField(
+        SupplierStaffMembership,
+        related_name="conversations",
+        blank=True
+    )
+    
+    # Single consumer contact
+    consumer_contact = models.ForeignKey(
+        ConsumerContact,
+        on_delete=models.CASCADE,
+        related_name="conversations"
+    )
+
+    # Optional relationship to Complaint
+    complaint = models.ForeignKey(
+        "scp.Complaint",
+        on_delete=models.SET_NULL,
+        related_name="conversations",
+        null=True,
+        blank=True
+    )
+
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
-        unique_together = ("supplier", "consumer")
-
     def __str__(self):
-        return f"Conversation: {self.consumer.name} <-> {self.supplier.name}"
-
+        staff_names = ", ".join([s.user.username for s in self.supplier_staff.all()])
+        return f"Conversation: {self.consumer_contact.user.username} <-> {staff_names}"
 
 class Message(models.Model):
     conversation = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name="messages")

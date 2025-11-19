@@ -222,13 +222,38 @@ class MessageSerializer(serializers.ModelSerializer):
 
 class ConversationSerializer(serializers.ModelSerializer):
     messages = MessageSerializer(many=True, read_only=True)
-    supplier_name = serializers.CharField(source='supplier.name', read_only=True)
-    consumer_name = serializers.CharField(source='consumer.name', read_only=True)
-    
+
+    # Friendly fields
+    supplier_name = serializers.CharField(
+        source="supplier_staff.supplier.name",
+        read_only=True
+    )
+    supplier_staff_name = serializers.CharField(
+        source="supplier_staff.user.username",
+        read_only=True
+    )
+
+    consumer_name = serializers.CharField(
+        source="consumer_contact.consumer.name",
+        read_only=True
+    )
+    consumer_contact_name = serializers.CharField(
+        source="consumer_contact.user.username",
+        read_only=True
+    )
+
     class Meta:
         model = Conversation
-        fields = ['id', 'supplier', 'supplier_name', 'consumer', 'consumer_name', 'created_at', 'updated_at', 'messages']
-        read_only_fields = ['id', 'created_at', 'updated_at', 'messages']
+        fields = [
+            "id", "supplier_staff", "consumer_contact", "supplier_name", "supplier_staff_name", "consumer_name",
+            "consumer_contact_name", "created_at", "updated_at", "messages"
+            ]
+
+        read_only_fields = [
+            "id", "supplier_name", "supplier_staff_name", "consumer_name",
+            "consumer_contact_name", "created_at", "updated_at", "messages"
+        ]
+
 
 class AttachmentSerializer(serializers.ModelSerializer):
     class Meta:

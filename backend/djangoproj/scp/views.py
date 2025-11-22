@@ -15,12 +15,12 @@ from .models import (
     User, Supplier, SupplierKYBDocument, Consumer, ConsumerContact,
     SupplierStaffMembership, SupplierConsumerLink, CatalogCategory, Product,
     ProductAttachment, Order, OrderItem, Complaint, Incident,
-    Conversation, Message, Attachment, Rating, Notification, AuditLog
+    Conversation, Message, Attachment, Notification, AuditLog
 )
 
 from .serializers import (
     UserReadSerializer, UserWriteSerializer, SupplierSerializer, OrderSerializer,
-    RatingSerializer, MessageSerializer, ProductSerializer, AuditLogSerializer, ConsumerSerializer,
+    MessageSerializer, ProductSerializer, AuditLogSerializer, ConsumerSerializer,
     IncidentSerializer, ComplaintSerializer, OrderItemSerializer, AttachmentSerializer,
     OrderCreateSerializer, ConversationSerializer, NotificationSerializer, SupplierKYBSerializer,
     CatalogCategorySerializer, ConsumerContactSerializer, ProductAttachmentSerializer, SupplierConsumerLinkSerializer,
@@ -28,7 +28,7 @@ from .serializers import (
 )
 
 from .permissions import (
-    IsAuthenticated, IsConversationParticipant, IsLinkedConsumerAndSupplierStaff, IsOwnerOrManager, IsSupplierStaff
+    IsAuthenticated, IsConversationParticipant, IsLinkedConsumerAndSupplierStaff, IsOwnerOrManager, IsPlatformAdminOrSuperUser, IsSupplierStaff
 )
 
 # -------------------------------
@@ -44,26 +44,103 @@ class UserViewSet(viewsets.ModelViewSet):
         return UserWriteSerializer
     # permission_classes = []  # Keep open for registration
 
-    # Registration
-    @action(detail=False, methods=['post'], url_path='register')
+    @action(detail=False, methods=['get'], url_path='me', permission_classes=[IsAuthenticated])
+    def me(self, request):
+        """Return the authenticated user's info."""
+        serializer = UserReadSerializer(request.user)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['post'], url_path='register', permission_classes=[])
     def register(self, request):
+        """
+        Unified registration endpoint.
+        Handles:
+        - Supplier Owner: creates supplier & membership
+        - Supplier Manager / Sales: requires supplier_id
+        - Consumer Contact: creates consumer
+        """
         data = request.data
         serializer = self.get_serializer(data=data)
-        if serializer.is_valid():
-            user = serializer.save()
-            user.set_password(data['password'])  # hash password
-            user.save()
-            return Response(self.get_serializer(user).data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        role = serializer.validated_data.get("role")
+
+        # --- Role-based validations ---
+        if role == "owner":
+            if not request.data.get("supplier_name"):
+                return Response(
+                    {"supplier_name": "This field is required for supplier owners."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        if role in ["manager", "sales"]:
+            supplier_id = request.data.get("supplier_id")
+            if not supplier_id:
+                return Response(
+                    {"supplier_id": f"This field is required for role '{role}'."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # Validate that supplier exists
+            try:
+                supplier = Supplier.objects.get(id=supplier_id)
+            except Supplier.DoesNotExist:
+                return Response(
+                    {"supplier_id": "Supplier not found."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Create user
+        user = serializer.save()
+        user.set_password(data["password"])
+        user.save()
+
+        # --- Handle specific roles ---
+        if role == "owner":
+            supplier = Supplier.objects.create(
+                name=request.data["supplier_name"],
+                description=request.data.get("supplier_description", ""),
+                owner=user
+            )
+            SupplierStaffMembership.objects.create(
+                supplier=supplier,
+                user=user,
+                role="owner"
+            )
+
+        elif role in ["manager", "sales"]:
+            SupplierStaffMembership.objects.create(
+                supplier=supplier,
+                user=user,
+                role=role
+            )
+
+        elif role == "consumer_contact":
+            consumer_name = data.get("consumer_name")
+            if not consumer_name:
+                return Response({"consumer_name": "This field is required for consumer registration."},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            consumer = Consumer.objects.create(name=consumer_name)
+            # Link user as primary contact
+            ConsumerContact.objects.create(consumer=consumer, user=user, is_primary=True)
+
+        return Response(self.get_serializer(user).data, status=status.HTTP_201_CREATED)
+
+
+        return Response(
+            UserReadSerializer(user).data,
+            status=status.HTTP_201_CREATED
+        )
 
     # Login
-    @action(detail=False, methods=['post'], url_path='login')
+    @action(detail=False, methods=['post'], url_path='login', permission_classes=[])
     def login(self, request):
         username = request.data.get('username')
         password = request.data.get('password')
         user = authenticate(username=username, password=password)
         if user:
-            # If you use token auth:
             from rest_framework.authtoken.models import Token
             token, created = Token.objects.get_or_create(user=user)
             return Response({'token': token.key})
@@ -73,6 +150,17 @@ class SupplierViewSet(viewsets.ModelViewSet):
     queryset = Supplier.objects.all()
     serializer_class = SupplierSerializer
     permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        """
+        Use platform-admin permission only for update/partial_update (PATCH/PUT).
+        All other actions use the default IsAuthenticated.
+        """
+        if self.action in ("update", "partial_update"):
+            return [IsAuthenticated(), IsPlatformAdminOrSuperUser()]
+        # for other actions, fall back to default auth (you can add more perms if needed)
+
+        return [IsAuthenticated(), IsOwnerOrManager()]
 
     def perform_create(self, serializer):
         supplier = serializer.save()
@@ -105,11 +193,35 @@ class SupplierViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsOwnerOrManager])
     def upload_kyb(self, request, pk=None):
         supplier = self.get_object()
+
         serializer = SupplierKYBSerializer(data=request.data)
+
         if serializer.is_valid():
-            serializer.save(uploaded_by=request.user, supplier=supplier)
+            serializer.save(
+                uploaded_by=request.user,
+                supplier=supplier
+            )
             return Response(serializer.data, status=status.HTTP_201_CREATED)
+
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    def update(self, request, *args, **kwargs):
+        # Users allowed to change KYB verification:
+        # - Django admin (is_staff = True)
+        # - Superusers
+
+        user = request.user
+        forbidden_fields = {"is_verified", "verification_status"}
+        if not user.is_staff and not user.is_superuser:
+            # Normal users → block if they attempt to modify these fields
+            for field in forbidden_fields:
+                if field in request.data:
+                    return Response(
+                        {"detail": f"You cannot modify '{field}'."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+
+        return super().update(request, *args, **kwargs)
 
 class SupplierKYBDocumentViewSet(viewsets.ModelViewSet):
     queryset = SupplierKYBDocument.objects.all()
@@ -350,14 +462,14 @@ class ComplaintViewSet(viewsets.ModelViewSet):
         # Determine consumer contact
         consumer_contact = ConsumerContact.objects.filter(user=complaint.filed_by).first()
         if not consumer_contact:
-            return Response({'detail':'No valid consumer contact found.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'detail': 'No valid consumer contact found.'}, status=status.HTTP_400_BAD_REQUEST)
 
         # Determine proper supplier staff based on priority
         supplier_staff = pick_staff_for_handling(supplier)  # returns a SupplierStaffMembership instance
         if not supplier_staff:
-            return Response({'detail':'No active supplier staff available.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'detail': 'No active supplier staff available.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Create conversation WITHOUT supplier_staff
+        # Create conversation (M2M)
         conversation_qs = Conversation.objects.filter(
             consumer_contact=consumer_contact,
             complaint=complaint
@@ -371,13 +483,16 @@ class ComplaintViewSet(viewsets.ModelViewSet):
                 consumer_contact=consumer_contact,
                 complaint=complaint
             )
-            # Add supplier staff AFTER creation
             conversation.supplier_staff.add(supplier_staff)
             created = True
 
-        # Link complaint to conversation (optional if already linked)
+        # Link complaint to conversation (optional)
         conversation.complaint = complaint
         conversation.save(update_fields=['complaint'])
+
+        # Assign initial staff to complaint
+        complaint.assigned_to = supplier_staff.user
+        complaint.save(update_fields=['assigned_to', 'status'])
 
     # ---------------------------
     # Escalate complaint
@@ -387,14 +502,13 @@ class ComplaintViewSet(viewsets.ModelViewSet):
         complaint = self.get_object()
         supplier = complaint.order.supplier
 
+        current_user = complaint.assigned_to or supplier.owner
         current_member = SupplierStaffMembership.objects.filter(
-            user=complaint.escalated_to or complaint.order.supplier.owner,
+            user=current_user,
             supplier=supplier
         ).first()
 
-        # Determine current role
         current_role = current_member.role if current_member else None
-
         role_chain = ["sales", "manager", "owner"]
 
         if current_role not in role_chain:
@@ -416,8 +530,16 @@ class ComplaintViewSet(viewsets.ModelViewSet):
         if not next_member:
             return Response({"detail": f"No active {next_role} available for escalation."}, status=400)
 
-        # Use model escalate() method
-        complaint.escalate(to_user=next_member.user)
+        # Assign next staff to complaint
+        complaint.assigned_to = next_member.user
+        complaint.status = Complaint.Status.ESCALATED
+        complaint.updated_at = timezone.now()
+        complaint.save(update_fields=['assigned_to', 'status', 'updated_at'])
+
+        # Add next staff to conversation participants if not already present
+        conversation = complaint.conversations.first()
+        if conversation:
+            conversation.supplier_staff.add(next_member)
 
         return Response(self.get_serializer(complaint).data)
 
@@ -437,6 +559,7 @@ class ComplaintViewSet(viewsets.ModelViewSet):
 
         complaint.mark_resolved(resolver=request.user, resolution_text=resolution_text)
         return Response(self.get_serializer(complaint).data)
+
 
 class IncidentViewSet(viewsets.ModelViewSet):
     queryset = Incident.objects.all()
@@ -534,11 +657,6 @@ class MessageViewSet(viewsets.ModelViewSet):
 class AttachmentViewSet(viewsets.ModelViewSet):
     queryset = Attachment.objects.all()
     serializer_class = AttachmentSerializer
-    permission_classes = [IsAuthenticated]
-
-class RatingViewSet(viewsets.ModelViewSet):
-    queryset = Rating.objects.all()
-    serializer_class = RatingSerializer
     permission_classes = [IsAuthenticated]
 
 class NotificationViewSet(viewsets.ModelViewSet):

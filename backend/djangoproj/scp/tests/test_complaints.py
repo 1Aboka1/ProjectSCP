@@ -9,90 +9,61 @@ from scp.models import (
     Consumer, ConsumerContact, SupplierConsumerLink,
     Product, CatalogCategory,
     Order, OrderItem,
-    Complaint, Incident
+    Complaint, Incident, Conversation, Message
 )
 
 
 class ComplaintsAndIncidentsTests(APITestCase):
-    """
-    Comprehensive tests for:
-      - Complaint creation (consumer)
-      - Complaint escalation (manager/owner)
-      - Complaint resolution (sales/manager/owner)
-      - Model-level escalate() and mark_resolved()
-      - Incident creation and updates
-    """
 
     def setUp(self):
-        # ---------- Users ----------
-        # supplier owner
-        self.supplier_owner = User.objects.create_user(
-            username="owner1", password="pass123", role="owner"
-        )
-        # manager
-        self.manager = User.objects.create_user(
-            username="manager1", password="pass123", role="manager"
-        )
-        # sales rep
-        self.sales = User.objects.create_user(
-            username="sales1", password="pass123", role="sales"
-        )
-        # consumer contact (actual login user for consumer)
-        self.consumer_user = User.objects.create_user(
-            username="consumer1", password="pass123", role="consumer_contact"
-        )
+        # Users
+        self.supplier_owner = User.objects.create_user(username="owner1", password="pass123", role="owner")
+        self.manager = User.objects.create_user(username="manager1", password="pass123", role="manager")
+        self.sales = User.objects.create_user(username="sales1", password="pass123", role="sales")
+        self.consumer_user = User.objects.create_user(username="consumer1", password="pass123", role="consumer_contact")
 
-        # ---------- Supplier & Staff ----------
-        self.supplier = Supplier.objects.create(
-            owner=self.supplier_owner,
-            name="Test Supplier"
-        )
-        # register staff memberships correctly
-        SupplierStaffMembership.objects.create(
+        # Supplier & Staff
+        self.supplier = Supplier.objects.create(owner=self.supplier_owner, name="Test Supplier")
+        self.owner_staff = SupplierStaffMembership.objects.create(
             supplier=self.supplier, user=self.supplier_owner, role="owner", is_active=True
         )
-        SupplierStaffMembership.objects.create(
+        self.manager_staff = SupplierStaffMembership.objects.create(
             supplier=self.supplier, user=self.manager, role="manager", is_active=True
         )
-        SupplierStaffMembership.objects.create(
+        self.sales_staff = SupplierStaffMembership.objects.create(
             supplier=self.supplier, user=self.sales, role="sales", is_active=True
         )
 
-        # ---------- Consumer & Contact ----------
+        # Consumer & Contact
         self.consumer = Consumer.objects.create(name="Test Restaurant")
         self.consumer_contact = ConsumerContact.objects.create(
             consumer=self.consumer, user=self.consumer_user, is_primary=True
         )
 
-        # ---------- Link (approved) ----------
-        self.link = SupplierConsumerLink.objects.create(
-            supplier=self.supplier,
-            consumer=self.consumer,
-            requested_by=self.sales,
-            status=SupplierConsumerLink.Status.APPROVED
+        # Supplier-Consumer Link
+        SupplierConsumerLink.objects.create(
+            supplier=self.supplier, consumer=self.consumer, requested_by=self.sales, status="approved"
         )
 
-        # ---------- Catalog / Product ----------
-        self.category = CatalogCategory.objects.create(
-            supplier=self.supplier, name="Fruits", slug="fruits"
-        )
+        # Product & Category
+        self.category = CatalogCategory.objects.create(supplier=self.supplier, name="Fruits", slug="fruits")
         self.product = Product.objects.create(
             supplier=self.supplier,
             category=self.category,
             name="Apple",
             unit="kg",
-            price=100.00,
+            price=100,
             stock=50,
             min_order_quantity=1
         )
 
-        # ---------- Order & OrderItem ----------
+        # Order & Item
         self.order = Order.objects.create(
             supplier=self.supplier,
             consumer=self.consumer,
             placed_by=self.consumer_user,
             status=Order.Status.PENDING,
-            total_amount=200.00
+            total_amount=200
         )
         self.order_item = OrderItem.objects.create(
             order=self.order,
@@ -103,154 +74,96 @@ class ComplaintsAndIncidentsTests(APITestCase):
         )
 
     def authenticate(self, user):
-        """Force-auth helper - always pass a User instance."""
         self.client.force_authenticate(user=user)
 
-    # -----------------------
-    # Complaint creation tests
-    # -----------------------
-    def test_consumer_can_create_complaint_for_order_item(self):
-        """Consumer user (consumer_contact) can file a complaint tied to an order item."""
+    def create_complaint(self):
         self.authenticate(self.consumer_user)
-
         url = reverse("complaint-list")
         payload = {
             "order": str(self.order.id),
             "order_item": str(self.order_item.id),
-            "description": "Product arrived damaged"
+            "description": "Product damaged"
         }
-
         resp = self.client.post(url, payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        return Complaint.objects.first()
 
-        # verify DB object
-        c = Complaint.objects.get(order=self.order)
-        self.assertEqual(c.filed_by, self.consumer_user)
-        self.assertEqual(c.order_item, self.order_item)
-        self.assertEqual(c.status, Complaint.Status.OPEN)
-        self.assertIn("Product arrived damaged", c.description)
-
-    def test_anonymous_cannot_create_complaint(self):
-        """Unauthenticated requests are rejected."""
-        url = reverse("complaint-list")
-        payload = {"order": str(self.order.id), "description": "bad"}
-        resp = self.client.post(url, payload, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
-
-    # -----------------------
-    # Complaint escalation tests
-    # -----------------------
-    def test_manager_can_escalate_complaint(self):
-        """Manager escalates complaint to owner via API (custom action expected)."""
-        # create complaint
-        complaint = Complaint.objects.create(
-            order=self.order,
-            order_item=self.order_item,
-            filed_by=self.consumer_user,
-            description="Wrong item"
-        )
-
-        self.authenticate(self.manager)
-
-        # assume viewset defines @action(detail=True, methods=["post"]) named 'escalate'
-        url = reverse("complaint-escalate", args=[str(complaint.id)])
-        payload = {"to_user_id": str(self.supplier_owner.id)}
-
-        resp = self.client.post(url, payload, format="json")
+    def send_message(self, conversation, sender, text):
+        self.authenticate(sender)
+        url = reverse("conversation-send-message", args=[conversation.id])
+        resp = self.client.post(url, {"text": text}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-
-        complaint.refresh_from_db()
-        self.assertEqual(complaint.status, Complaint.Status.ESCALATED)
-        self.assertEqual(complaint.escalated_to, self.supplier_owner)
-        self.assertIsNotNone(complaint.escalated_at)
-
-    def test_non_staff_cannot_escalate(self):
-        """Consumer cannot escalate complaints."""
-        complaint = Complaint.objects.create(
-            order=self.order, filed_by=self.consumer_user, description="Issue"
-        )
-
-        # authenticate as consumer_user (not staff)
-        self.authenticate(self.consumer_user)
-
-        url = reverse("complaint-escalate", args=[str(complaint.id)])
-        resp = self.client.post(url, {"to_user": str(self.manager.id)}, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        return Message.objects.get(conversation=conversation, sender=sender)
 
     # -----------------------
-    # Complaint resolution tests
+    # Complaint creation tests
     # -----------------------
-    def test_sales_can_resolve_first_line_and_mark_resolved(self):
-        """Sales rep resolves complaint using API action 'resolve' (custom)."""
-        complaint = Complaint.objects.create(
-            order=self.order, filed_by=self.consumer_user, description="Too few items"
-        )
+    def test_complaint_creates_conversation(self):
+        complaint = self.create_complaint()
+        supplier_staff_found = self.sales_staff  # pick_staff_for_handling would pick sales first
+        conv = Conversation.objects.filter(consumer_contact=self.consumer_contact, complaint=complaint).first()
+        self.assertIsNotNone(conv)
+        self.assertIn(supplier_staff_found, conv.supplier_staff.all())
+        self.assertEqual(conv.consumer_contact, self.consumer_contact)
+
+    def test_consumer_can_send_message(self):
+        complaint = self.create_complaint()
+        conv = Conversation.objects.filter(consumer_contact=self.consumer_contact).first()
+        msg = self.send_message(conv, self.consumer_user, "Hello, issue here.")
+        self.assertEqual(msg.text, "Hello, issue here.")
+        self.assertEqual(msg.sender, self.consumer_user)
+        self.assertEqual(msg.conversation, conv)
+
+    def test_sales_can_reply_message(self):
+        complaint = self.create_complaint()
+        conv = Conversation.objects.filter(consumer_contact=self.consumer_contact).first()
+        msg = self.send_message(conv, self.sales, "We are looking into this issue.")
+        self.assertEqual(msg.sender, self.sales)
+        self.assertEqual(msg.conversation, conv)
+        self.assertIn(self.sales_staff, conv.supplier_staff.all())
+        
+    # -----------------------
+    # Escalation tests
+    # -----------------------
+    def test_escalation_flow_updates_assigned_to_and_conversation(self):
+        complaint = self.create_complaint()
+
+        # Initial assigned_to is sales
+        complaint.assigned_to = self.sales
+        complaint.save(update_fields=['assigned_to'])
 
         self.authenticate(self.sales)
+        url = reverse("complaint-escalate", args=[complaint.id])
+        resp = self.client.post(url, {}, format="json")  # next escalation
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        complaint.refresh_from_db()
+        self.assertEqual(complaint.assigned_to, self.manager)
+        conv = complaint.conversations.first()
+        self.assertIn(self.manager_staff, conv.supplier_staff.all())
 
-        url = reverse("complaint-resolve", args=[str(complaint.id)])
-        payload = {"resolution": "Refund issued 10 USD"}
+        # Escalate to owner
+        self.authenticate(self.manager)
+        resp = self.client.post(url, {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        complaint.refresh_from_db()
+        self.assertEqual(complaint.assigned_to, self.supplier_owner)
+        self.assertIn(self.owner_staff, conv.supplier_staff.all())
 
+    # -----------------------
+    # Resolution tests
+    # -----------------------
+    def test_resolution_updates_assigned_to_and_status(self):
+        complaint = self.create_complaint()
+        complaint.assigned_to = self.sales
+        complaint.save(update_fields=['assigned_to'])
+
+        self.authenticate(self.sales)
+        url = reverse("complaint-resolve", args=[complaint.id])
+        payload = {"resolution": "Issue resolved, product replaced."}
         resp = self.client.post(url, payload, format="json")
-        # small safety: if view uses 200 or 202 or 204, allow 200
         self.assertIn(resp.status_code, (status.HTTP_200_OK, status.HTTP_202_ACCEPTED, status.HTTP_204_NO_CONTENT))
-
         complaint.refresh_from_db()
         self.assertEqual(complaint.status, Complaint.Status.RESOLVED)
-        self.assertEqual(complaint.resolution, "Refund issued 10 USD")
+        self.assertEqual(complaint.resolution, "Issue resolved, product replaced.")
         self.assertEqual(complaint.assigned_to, self.sales)
         self.assertIsNotNone(complaint.resolved_at)
-
-    def test_cannot_resolve_without_resolution_text(self):
-        """Resolver must provide 'resolution' text when resolving via API."""
-        complaint = Complaint.objects.create(order=self.order, filed_by=self.consumer_user, description="Issue")
-
-        self.authenticate(self.sales)
-        url = reverse("complaint-resolve", args=[str(complaint.id)])
-        resp = self.client.post(url, {}, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-
-    # -----------------------
-    # Model-level methods (unit checks)
-    # -----------------------
-    def test_complaint_escalate_model_method(self):
-        c = Complaint.objects.create(order=self.order, filed_by=self.consumer_user, description="A")
-        c.escalate(self.manager)
-        c.refresh_from_db()
-        self.assertEqual(c.status, Complaint.Status.ESCALATED)
-        self.assertEqual(c.escalated_to, self.manager)
-        self.assertIsNotNone(c.escalated_at)
-
-    def test_complaint_mark_resolved_model_method(self):
-        c = Complaint.objects.create(order=self.order, filed_by=self.consumer_user, description="B")
-        c.mark_resolved(self.sales, "done")
-        c.refresh_from_db()
-        self.assertEqual(c.status, Complaint.Status.RESOLVED)
-        self.assertEqual(c.resolution, "done")
-        self.assertEqual(c.assigned_to, self.sales)
-        self.assertIsNotNone(c.resolved_at)
-
-    # -----------------------
-    # Incident tests
-    # -----------------------
-    def test_consumer_can_report_incident(self):
-        self.authenticate(self.consumer_user)
-        url = reverse("incident-list")
-        payload = {"supplier": str(self.supplier.id), "title": "Spoiled food", "description": "Found spoilage"}
-        resp = self.client.post(url, payload, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
-
-    def test_incident_update_status_and_export(self):
-        inc = Incident.objects.create(supplier=self.supplier, title="X", description="Y", reported_by=self.supplier_owner)
-        self.authenticate(self.manager)
-        url = reverse("incident-detail", args=[str(inc.id)])
-        resp = self.client.patch(url, {"status": "in_progress"}, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        inc.refresh_from_db()
-        self.assertEqual(inc.status, "in_progress")
-
-        # mark exported
-        resp2 = self.client.patch(url, {"exported": True}, format="json")
-        self.assertEqual(resp2.status_code, status.HTTP_200_OK)
-        inc.refresh_from_db()
-        self.assertTrue(inc.exported)

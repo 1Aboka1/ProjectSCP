@@ -73,6 +73,27 @@ class ChatSystemTests(APITestCase):
         resp = self.client.post(url, payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         return Complaint.objects.first()
+    
+    def escalate_complaint_helper(self, complaint, user=None):
+        """
+        Helper to escalate a complaint via the DRF 'complaint-escalate' action.
+        Automatically finds the next supplier staff, updates complaint.assigned_to,
+        and adds the new staff to linked conversation(s).
+        """
+        if user:
+            self.authenticate(user)
+
+        url = reverse("complaint-escalate", args=[str(complaint.id)])
+        payload = {}  # the viewset automatically decides the next staff
+        resp = self.client.post(url, payload, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        # Refresh complaint and optionally its conversation(s)
+        complaint.refresh_from_db()
+        for conv in complaint.conversations.all():
+            conv.refresh_from_db()
+
+        return complaint
 
     def send_message(self, conversation, sender, text):
         self.authenticate(sender)
@@ -140,30 +161,29 @@ class ChatSystemTests(APITestCase):
         self.authenticate(stranger)
         url = reverse("conversation-send-message", args=[conv.id])
         resp = self.client.post(url, {"text": "Hi"}, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_escalation_flow(self):
         complaint = self.create_complaint()
 
         # 🔼 Sales → Manager
         self.authenticate(self.sales)
-        url = reverse("complaint-escalate", args=[complaint.id])
-        payload = {"to_user_id": str(self.manager.id)}
+        url = reverse("complaint-escalate", args=[str(complaint.id)])
+        payload = {}  # viewset determines next staff automatically
         resp = self.client.post(url, payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
         complaint.refresh_from_db()
         self.assertEqual(complaint.status, Complaint.Status.ESCALATED)
-        self.assertEqual(complaint.escalated_to, self.manager)
+        self.assertEqual(complaint.assigned_to, self.manager)
 
         # 🔼 Manager → Owner
         self.authenticate(self.manager)
-        payload = {"to_user_id": str(self.supplier_owner.id)}
         resp = self.client.post(url, payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
         complaint.refresh_from_db()
-        self.assertEqual(complaint.escalated_to, self.supplier_owner)
+        self.assertEqual(complaint.assigned_to, self.supplier_owner)
 
     def test_resolution_flow(self):
         complaint = self.create_complaint()
@@ -181,11 +201,13 @@ class ChatSystemTests(APITestCase):
 
     def test_message_ordering_and_read_flag(self):
         complaint = self.create_complaint()
-
         conv = Conversation.objects.get(
-            supplier_staff__in=[self.sales_staff],
-            consumer_contact=self.consumer_contact
+            consumer_contact=self.consumer_contact,
+            supplier_staff__in=[self.sales_staff]
         )
+
+        # Escalate complaint: sales → manager
+        self.escalate_complaint_helper(complaint, user=self.sales)
 
         m1 = self.send_message(conv, self.consumer_user, "First message")
         m2 = self.send_message(conv, self.sales, "Second message")

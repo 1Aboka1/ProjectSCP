@@ -4,7 +4,7 @@ from django.utils import timezone
 from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework import serializers
+from rest_framework import serializers, permissions
 from rest_framework.permissions import IsAuthenticated, BasePermission, SAFE_METHODS
 from rest_framework.routers import DefaultRouter
 from django.conf import settings
@@ -15,7 +15,7 @@ from .models import (
     User, Supplier, SupplierKYBDocument, Consumer, ConsumerContact,
     SupplierStaffMembership, SupplierConsumerLink, CatalogCategory, Product,
     ProductAttachment, Order, OrderItem, Complaint, Incident,
-    Conversation, Message, Attachment, Rating, Notification, AuditLog
+    Conversation, Message, Attachment, Notification, AuditLog
 )
 
 # -------------------------------
@@ -124,3 +124,24 @@ class IsConversationParticipant(BasePermission):
             if user.role == 'consumer_contact':
                 return obj.consumer.contacts.filter(user=user).exists()
         return False
+
+class IsPlatformAdminOrSuperUser(permissions.BasePermission):
+    """
+    Allows access only to users whose `role` is 'platform_admin' or to Django superusers.
+    """
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+
+        # Allow Django superuser always
+        if getattr(user, "is_superuser", False) or getattr(user, "is_staff", False):
+            return True
+
+        # Role-based check (platform_admin)
+        return getattr(user, "role", None) == "platform_admin"
+
+    def has_object_permission(self, request, view, obj):
+        # same behavior for object-level checks
+        return self.has_permission(request, view)    

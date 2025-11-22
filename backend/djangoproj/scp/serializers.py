@@ -15,7 +15,7 @@ from .models import (
     User, Supplier, SupplierKYBDocument, Consumer, ConsumerContact,
     SupplierStaffMembership, SupplierConsumerLink, CatalogCategory, Product,
     ProductAttachment, Order, OrderItem, Complaint, Incident,
-    Conversation, Message, Attachment, Rating, Notification, AuditLog
+    Conversation, Message, Attachment, Notification, AuditLog
 )
 
 # -------------------------------
@@ -47,18 +47,75 @@ class UserWriteSerializer(serializers.ModelSerializer):
         user.save()
         return user
     
+class RegisterSerializer(serializers.Serializer):
+    username = serializers.CharField(required=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    password = serializers.CharField(write_only=True)
+    display_name = serializers.CharField(required=False, allow_blank=True)
+    phone = serializers.CharField(required=False, allow_blank=True)
+
+    role = serializers.ChoiceField(choices=[
+        ("owner", "Supplier Owner"),
+        ("consumer_contact", "Consumer Contact"),
+    ])
+
+    # Supplier fields (required only for owners)
+    supplier_name = serializers.CharField(required=False)
+    supplier_description = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, data):
+        if data["role"] == "owner" and not data.get("supplier_name"):
+            raise serializers.ValidationError({
+                "supplier_name": "This field is required for supplier owners."
+            })
+        return data
+
+    def create(self, validated_data):
+        role = validated_data["role"]
+
+        supplier_name = validated_data.pop("supplier_name", None)
+        supplier_description = validated_data.pop("supplier_description", "")
+
+        # Create user
+        user = User.objects.create_user(
+            username=validated_data["username"],
+            email=validated_data.get("email", ""),
+            password=validated_data["password"],
+            display_name=validated_data.get("display_name", ""),
+            phone=validated_data.get("phone", ""),
+            role=role,
+        )
+
+        # Create supplier + membership if owner
+        if role == "owner":
+            supplier = Supplier.objects.create(
+                name=supplier_name,
+                description=supplier_description,
+                owner=user
+            )
+            SupplierStaffMembership.objects.create(
+                supplier=supplier,
+                user=user,
+                role="owner"
+            )
+
+        # Create consumer record if consumer_contact
+        if role == "consumer_contact":
+            Consumer.objects.create(user=user)
+
+        return user
+    
 class SupplierSerializer(serializers.ModelSerializer):
     class Meta:
         model = Supplier
-        fields = ['id','name','legal_name','description','country','city','address','contact_email','contact_phone',
-                  'is_verified','verification_status','default_currency','languages','created_at','updated_at','deleted']
-        read_only_fields = ['id','created_at','updated_at']
+        fields = "__all__"
+        read_only_fields = ("id", "created_at")
 
 class SupplierKYBSerializer(serializers.ModelSerializer):
     class Meta:
         model = SupplierKYBDocument
-        fields = ['id','supplier','document','uploaded_by','uploaded_at','note']
-        read_only_fields = ['id','uploaded_by','uploaded_at']
+        fields = ["id", "supplier", "document", "uploaded_by", "uploaded_at", "note"]
+        read_only_fields = ["id", "supplier", "uploaded_by", "uploaded_at"]
 
 class ConsumerSerializer(serializers.ModelSerializer):
     class Meta:
@@ -203,8 +260,20 @@ class OrderCreateSerializer(serializers.ModelSerializer):
 class ComplaintSerializer(serializers.ModelSerializer):
     class Meta:
         model = Complaint
-        fields = ['id','order','order_item','filed_by','assigned_to','status','description','resolution','created_at','updated_at','resolved_at','escalated_to','escalated_at']
-        read_only_fields = ['id','created_at','updated_at','resolved_at','escalated_at']
+        fields = [
+            'id',
+            'order',
+            'order_item',
+            'filed_by',
+            'assigned_to',
+            'status',
+            'description',
+            'resolution',
+            'created_at',
+            'updated_at',
+            'resolved_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'resolved_at']
 
 class IncidentSerializer(serializers.ModelSerializer):
     class Meta:
@@ -260,12 +329,6 @@ class AttachmentSerializer(serializers.ModelSerializer):
         model = Attachment
         fields = ['id','message','file','filename','uploaded_at']
         read_only_fields = ['id','uploaded_at']
-
-class RatingSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Rating
-        fields = ['id','order','score','comment','created_at']
-        read_only_fields = ['id','created_at']
 
 class NotificationSerializer(serializers.ModelSerializer):
     class Meta:

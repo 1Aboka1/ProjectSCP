@@ -22,7 +22,6 @@ router.register(r'incidents', views.IncidentViewSet, basename='incident')
 router.register(r'conversations', views.ConversationViewSet, basename='conversation')
 router.register(r'messages', views.MessageViewSet, basename='message')
 router.register(r'attachments', views.AttachmentViewSet, basename='attachment')
-router.register(r'ratings', views.RatingViewSet, basename='rating')
 router.register(r'notifications', views.NotificationViewSet, basename='notification')
 router.register(r'auditlogs', views.AuditLogViewSet, basename='auditlog')
 

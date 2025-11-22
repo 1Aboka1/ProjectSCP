@@ -365,14 +365,11 @@ class Complaint(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     resolved_at = models.DateTimeField(blank=True, null=True)
 
-    # escalation trail: who it was escalated to (Manager/Owner)
-    escalated_to = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="complaints_escalated")
-    escalated_at = models.DateTimeField(blank=True, null=True)
-
     def escalate(self, to_user: models.Model):
-        self.escalated_to = to_user
-        self.escalated_at = timezone.now()
+        """Assign the complaint to the next staff level"""
+        self.assigned_to = to_user
         self.status = self.Status.ESCALATED
+        self.updated_at = timezone.now()
         self.save()
 
     def mark_resolved(self, resolver: models.Model, resolution_text: str):
@@ -462,20 +459,6 @@ class Attachment(models.Model):
 
     def __str__(self):
         return f"Attachment {self.filename or self.file.name}"
-
-
-# -----------------------------
-# Ratings & Reviews (OPTIONAL)
-# -----------------------------
-class Rating(models.Model):
-    order = models.OneToOneField(Order, on_delete=models.CASCADE, related_name="rating")
-    score = models.PositiveSmallIntegerField()  # 1..5
-    comment = models.TextField(blank=True, null=True)
-    created_at = models.DateTimeField(default=timezone.now)
-
-    def __str__(self):
-        return f"Rating {self.score} for {self.order.id}"
-
 
 # -----------------------------
 # Basic notification & audit models (minimal)

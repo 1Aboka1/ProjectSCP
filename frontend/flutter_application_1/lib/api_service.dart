@@ -2,6 +2,11 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
+
+/// NOTE:
+/// We keep using the same token-storage helpers you had (SharedPreferences).
+/// If you already have setToken/getToken implemented elsewhere, keep them.
+/// Here we still reference them; if you use a different helper, adapt accordingly.
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
@@ -26,8 +31,7 @@ class ApiService {
 
   /// --- Default headers with token ---
   static Future<Map<String, String>> defaultHeaders() async {
-
-    final token = await ApiService.getToken();
+    final token = await getToken();
     final headers = {
       HttpHeaders.contentTypeHeader: "application/json",
       "Accept": "application/json",
@@ -66,7 +70,8 @@ class ApiService {
     return http.delete(url, headers: headers);
   }
 
-  /// --- Multipart POST (file uploads) ---
+  /// --- Existing helper: multipart POST (file uploads) ---
+  /// Returns a StreamedResponse (you can convert to http.Response.fromStream).
   static Future<http.StreamedResponse> postMultipart(
     String path,
     Map<String, String> fields,
@@ -83,5 +88,39 @@ class ApiService {
     req.fields.addAll(fields);
     req.files.addAll(files);
     return req.send();
+  }
+
+  // -------------------------------------------------------
+  // Convenience wrappers used by ProductCreateScreen earlier
+  // -------------------------------------------------------
+
+  /// Build an empty MultipartRequest for `endpoint` (like "products/").
+  /// Caller can mutate `.fields` and `.files`.
+  static Future<http.MultipartRequest> multipart(String endpoint) async {
+    final uri = Uri.parse(baseUrl + endpoint);
+    final req = http.MultipartRequest("POST", uri);
+    final token = await getToken();
+    if (token != null && token.isNotEmpty) {
+      req.headers['Authorization'] = "Token $token";
+    }
+    // Don't set content-type here; http will set appropriate boundary header
+    return req;
+  }
+
+  /// Create a MultipartFile from a local file path.
+  static Future<http.MultipartFile> multipartFile({
+    required String field,
+    required File file,
+    String? filename,
+  }) async {
+    // http.MultipartFile.fromPath will guess content-type from file extension
+    return await http.MultipartFile.fromPath(field, file.path, filename: filename);
+  }
+
+  /// Send a prepared MultipartRequest and return a http.Response
+  /// (converts the StreamedResponse to a Response).
+  static Future<http.Response> sendMultipart(http.MultipartRequest req) async {
+    final streamed = await req.send();
+    return await http.Response.fromStream(streamed);
   }
 }

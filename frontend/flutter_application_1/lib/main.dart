@@ -4,6 +4,7 @@ import 'package:flutter_application_1/screens/login_screen.dart';
 import 'package:flutter_application_1/providers/auth_provider.dart';
 import 'package:flutter_application_1/providers/cart_provider.dart';
 import 'package:provider/provider.dart';
+import 'package:flutter_application_1/screens/product_create_screen.dart';
 
 void main() {
   runApp(MyApp());
@@ -25,6 +26,7 @@ class MyApp extends StatelessWidget {
         home: HomeDecider(),
         routes: {
           "/login": (_) => LoginScreen(),
+          "/product_create": (context) => ProductCreateScreen(),
         },
       ),
     );

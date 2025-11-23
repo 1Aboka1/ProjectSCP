@@ -20,28 +20,23 @@ class AuthProvider extends ChangeNotifier {
     final t = await ApiService.getToken();
     if (t != null) {
       token = t;
-      print('IS THIS EVEN HAPPENING?');
 
       final resp = await ApiService.get("users/me/");
       if (resp.statusCode == 200) {
         user = User.fromJson(jsonDecode(resp.body));
-        print('THEN THIS?');
 
         // fetch linked organization
         if (user!.role == "owner" ||
             user!.role == "manager" ||
             user!.role == "sales") {
-          print('AND MAYBE THIS?');
 
           final sResp = await ApiService.get(
             "staff/?user=${user!.id}",
           );
           if (sResp.statusCode == 200) {
-            print('OR COULD BE THIS?');
 
             final data = jsonDecode(sResp.body);
             if (data.isNotEmpty) {
-              print('AMAYBE MAYBE THIS?');
 
               final supplierId =
                   data[0]['supplier']; // <-- this is a string UUID

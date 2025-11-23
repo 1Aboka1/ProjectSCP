@@ -397,7 +397,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         order = self.get_object()
         if order.status != Order.Status.PENDING:
             return Response({'detail':'Cannot accept'}, status=status.HTTP_400_BAD_REQUEST)
-        order.status = Order.Status.ACCEPTED
+        order.status = Order.Status.IN_PROGRESS
         order.accepted_at = timezone.now()
         order.save()
         for item in order.items.all():
@@ -412,6 +412,15 @@ class OrderViewSet(viewsets.ModelViewSet):
         if order.status != Order.Status.PENDING:
             return Response({'detail':'Cannot reject'}, status=status.HTTP_400_BAD_REQUEST)
         order.status = Order.Status.REJECTED
+        order.save()
+        return Response(OrderSerializer(order).data)
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsSupplierStaff])
+    def complete(self, request, pk=None):
+        order = self.get_object()
+        if order.status != Order.Status.IN_PROGRESS:
+            return Response({'detail':'Cannot complete'}, status=status.HTTP_400_BAD_REQUEST)
+        order.status = Order.Status.COMPLETED
         order.save()
         return Response(OrderSerializer(order).data)
 

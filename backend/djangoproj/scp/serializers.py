@@ -315,7 +315,7 @@ class ConversationSerializer(serializers.ModelSerializer):
         model = Conversation
         fields = [
             "id", "supplier_staff", "consumer_contact", "supplier_name", "supplier_staff_name", "consumer_name",
-            "consumer_contact_name", "created_at", "updated_at", "messages"
+            "consumer_contact_name", "created_at", "updated_at", "messages", "complaint"
             ]
 
         read_only_fields = [

@@ -1,4 +1,3 @@
-// lib/widgets/app_bottom_nav.dart
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
@@ -22,25 +21,50 @@ class AppBottomNav extends StatelessWidget {
 
     // Base tabs (visible for everyone)
     final List<BottomNavigationBarItem> baseItems = [
-      BottomNavigationBarItem(icon: Icon(Icons.list_alt), label: 'Products'),
-      BottomNavigationBarItem(icon: Icon(Icons.chat_bubble_outline), label: 'Chat'),
-      BottomNavigationBarItem(icon: Icon(Icons.person_outline), label: 'Me'),
+      const BottomNavigationBarItem(
+        icon: Icon(Icons.list_alt),
+        label: 'Products',
+      ),
+      const BottomNavigationBarItem(
+        icon: Icon(Icons.chat_bubble_outline),
+        label: 'Chat',
+      ),
+      const BottomNavigationBarItem(
+        icon: Icon(Icons.person_outline),
+        label: 'Me',
+      ),
     ];
 
     // Role-specific items appended after baseItems
     List<BottomNavigationBarItem> roleItems = [];
 
     if (role == 'consumer_contact') {
-      roleItems = [
+      roleItems = const [
         BottomNavigationBarItem(icon: Icon(Icons.store), label: 'Suppliers'),
         BottomNavigationBarItem(icon: Icon(Icons.shopping_cart), label: 'Cart'),
         BottomNavigationBarItem(icon: Icon(Icons.link), label: 'Requests'),
       ];
     } else if (role == 'owner' || role == 'manager' || role == 'sales') {
       roleItems = [
-        BottomNavigationBarItem(icon: Icon(Icons.receipt_long), label: 'Orders'),
-        BottomNavigationBarItem(icon: Icon(Icons.notifications_none), label: 'Notifications'),
+        const BottomNavigationBarItem(
+          icon: Icon(Icons.receipt_long),
+          label: 'Orders',
+        ),
+        const BottomNavigationBarItem(
+          icon: Icon(Icons.notifications_none),
+          label: 'Notifications',
+        ),
       ];
+
+      // Only owner gets the "Staff" tab
+      if (role == 'owner') {
+        roleItems.add(
+          const BottomNavigationBarItem(
+            icon: Icon(Icons.group),
+            label: 'Staff',
+          ),
+        );
+      }
     }
 
     final items = [...baseItems, ...roleItems];

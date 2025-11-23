@@ -29,10 +29,8 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     });
 
     try {
-      print("hmmm 1");
       final auth = Provider.of<AuthProvider>(context, listen: false);
       final supplierId = auth.supplier?.id;
-      print(supplierId);
 
       if (supplierId == null) {
         setState(() {

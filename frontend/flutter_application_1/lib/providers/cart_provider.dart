@@ -31,13 +31,22 @@ class CartProvider extends ChangeNotifier {
     return _items.fold(0.0, (s, e) => s + (e.product.price * e.qty));
   }
 
+  /// Build payload expected by backend.
+  /// supplierId and consumerId must be supplier/consumer UUID strings.
   Map<String, dynamic> toOrderPayload(String supplierId, String consumerId) {
     return {
       "supplier": supplierId,
       "consumer": consumerId,
       "status": "pending",
       "total_amount": total,
-      "items": _items.map((it) => {"product": it.product.id, "quantity": it.qty}).toList()
+      "items": _items.map((it) => {
+        // product.id should be a String (UUID) matching backend Product.id
+        "product": it.product.id,
+        // quantity must be numeric (use double or int)
+        "quantity": it.qty,
+        // optionally include unit_price (server can compute, but safe to include)
+        "unit_price": it.product.price,
+      }).toList()
     };
   }
 }

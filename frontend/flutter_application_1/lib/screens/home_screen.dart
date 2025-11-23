@@ -1,5 +1,6 @@
 // lib/screens/home_screen.dart
 import 'package:flutter/material.dart';
+import 'package:flutter_application_1/screens/staff_management_screen.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
 import '../widgets/app_bottom_nav.dart';
@@ -45,6 +46,9 @@ class _HomeScreenState extends State<HomeScreen> {
         OrdersScreen(),
         NotificationsScreen(),
       ]);
+      if (role == 'owner') {
+        pages.add(StaffManagementScreen()); // owner-only tab
+      }
     }
     return pages;
   }
